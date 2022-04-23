@@ -133,7 +133,7 @@ def main(args):
 
     # classifier = MODEL.get_model(args, num_class, normal_channel=args.normal).cuda()
     # criterion = MODEL.get_loss().cuda()
-    classifier = MODEL.get_model(num_class, normal_channel=args.normal)
+    classifier = MODEL.get_model(last_npoint=10, atom_num_per_last_point = 10, atom_type_num = 10, normal_channel=args.normal)
     criterion = MODEL.get_loss()
     try:
         checkpoint = torch.load(str(experiment_dir) + '/checkpoints/best_model.pth')
@@ -189,15 +189,14 @@ def main(args):
             points[:, :, 0:3] = provider.random_scale_point_cloud(points[:, :, 0:3])
             points[:, :, 0:3] = provider.shift_point_cloud(points[:, :, 0:3])
             points = torch.Tensor(points)
-            target = target[:, 0]
 
             points = points.transpose(2, 1)
             # points, target = points.cuda(), target.cuda()
             optimizer.zero_grad()
 
             classifier = classifier.train()
-            pred, trans_feat = classifier(points)
-            loss = criterion(pred, target.long(), trans_feat)
+            center_coords, coords, types = classifier(points)
+            loss = criterion(center_coords, coords, types, target)
             pred_choice = pred.data.max(1)[1]
             correct = pred_choice.eq(target.long().data).cpu().sum()
             mean_correct.append(correct.item() / float(points.size()[0]))

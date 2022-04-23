@@ -32,12 +32,11 @@ def square_distance(src, dst):
     Output:
         dist: per-point square distance, [B, N, M]
     """
-    B, N, _ = src.shape
-    _, M, _ = dst.shape
-    dist = -2 * torch.matmul(src, dst.permute(0, 2, 1))
-    dist += torch.sum(src ** 2, -1).view(B, N, 1)
-    dist += torch.sum(dst ** 2, -1).view(B, 1, M)
+    dist = -2 * torch.matmul(src, dst.transpose(-1,-2))
+    dist += torch.sum(src ** 2, -1).unsqueeze(-1)
+    dist += torch.sum(dst ** 2, -1).unsqueeze(-2)
     return dist
+
 
 
 def index_points(points, idx):
@@ -197,7 +196,7 @@ class PointNetSetAbstraction(nn.Module):
             bn = self.mlp_bns[i]
             new_points =  F.relu(bn(conv(new_points)))
 
-        new_points = torch.max(new_points, 2)[0]
+        new_points = torch.max(new_points, 2)[ 0]
         new_xyz = new_xyz.permute(0, 2, 1)
         return new_xyz, new_points
 

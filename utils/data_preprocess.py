@@ -19,6 +19,8 @@ x,y,z normalization
 normalize from [-10,10] to [-1,1]
 '''
 
+atom_type_config = { 'C':0, 'N':1 , 'O':2, 'F':3, 'Cl':4, 'Br':5, 'I':6, 'S':7, 'P':8, 'H':9 }
+
 
 def split_train_valid_test(dir_path):
     dir_name = os.path.basename(dir_path)
@@ -46,10 +48,10 @@ def get_atom_coords(pdb_path):
     result = []
     for atom in atoms:
         idx = atom.GetIdx()
-        atom_num = atom.GetAtomicNum()
+        atom_str = atom.GetSymbol()
         coord = conf.GetAtomPosition(idx)
-        result.append([coord.x, coord.y, coord.z, atom_num])
-    return np.array(result)
+        result.append([coord.x, coord.y, coord.z, atom_type_config[atom_str]])
+    return np.array(result,dtype=np.float32)
 
 class ElectronDensityDirDataset(Dataset):
     def __init__(self, dir_path, split='train', sample_npoints = 20000, lowerbound_npoints = 40000, max_atom_count = 50):
@@ -87,14 +89,13 @@ class ElectronDensityDirDataset(Dataset):
 
     def _data_normalize_coord_atoms(self, coord_atoms, max_atom_count):
         coord_atoms[:,0:-1] /= 10 #coordinates normalized by divide 10
-        result = np.pad(coord_atoms, ((0, max_atom_count - coord_atoms.shape[0]), (0, 0)), 'constant', constant_values=(0, 0))
+        result = np.pad(coord_atoms, ((0, max_atom_count - coord_atoms.shape[0]), (0, 0)), 'constant', constant_values=(0, 100))
         return result
 
     def __getitem__(self, index: int):
         filename = self.filenames[index]
         fpath = os.path.join(self.dir_path, filename)
-        electron_density = np.load(fpath)
-
+        electron_density = np.load(fpath).astype(np.float32)
         pdb_path = os.path.join("{}_pdb".format(self.dir_path), "{}.pdb".format(filename[:-4]))
         coord_atoms = get_atom_coords(pdb_path)
 
