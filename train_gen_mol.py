@@ -12,6 +12,9 @@ import utils.provider as provider
 import importlib
 import shutil
 from pytorch3d.transforms import RotateAxisAngle, Rotate, random_rotations
+import utils.dataset_collate_ignore_none as clfn
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = BASE_DIR
@@ -29,7 +32,7 @@ def parse_args():
                         help='Initial learning rate (for SGD it is multiplied by 100) [default: 0.001]')
     parser.add_argument('--decay_rate', type=float, default=1e-4, help='Decay rate [default: 1e-4]')
     parser.add_argument('--optimizer', type=str, default='SGD', help='Pptimizer for training [default: SGD]')
-    parser.add_argument('--gpu', type=str, default='0', help='Specify gpu device [default: 0]')
+    parser.add_argument('--gpu', type=int, default=[0], help='Specify gpu device [default: 0]')
     parser.add_argument('--num_point', type=int, default=20000, help='Point Number [default: 20000]')
     parser.add_argument('--log_dir', type=str, default='vn_dgcnn/aligned',
                         help='Experiment root [default: vn_dgcnn/aligned]')
@@ -85,7 +88,9 @@ def main(args):
         print(str)
 
     '''HYPER PARAMETER'''
-    os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
+    os.environ["CUDA_VISIBLE_DEVICES"] = ','.join(str(args.gpu))
+    torch.cuda.set_device(args.gpu)  # 作用相当于CUDA_VISIBLE_DEVICES命令，修改环境变量
+    dist.init_process_group(backend='nccl')  # 设备间通讯通过后端backend实现，GPU上用nccl，CPU上用gloo
 
     '''CREATE DIR'''
     timestr = str(datetime.datetime.now().strftime('%Y-%m-%d_%H-%M'))
@@ -122,19 +127,23 @@ def main(args):
     TRAIN_DATASET = ElectronDensityDirDataset(DATA_PATH, split='train', sample_npoints=args.num_point)
     VALID_DATASET = ElectronDensityDirDataset(DATA_PATH, split='valid', sample_npoints=args.num_point)
     TEST_DATASET = ElectronDensityDirDataset(DATA_PATH,  split='test', sample_npoints=args.num_point)
-    trainDataLoader = torch.utils.data.DataLoader(TRAIN_DATASET, batch_size=args.batch_size, shuffle=True,
+    trainDataLoader = torch.utils.data.DataLoader(TRAIN_DATASET, collate_fn = clfn.collate_ignore_none, batch_size=args.batch_size, shuffle=True,
                                                   num_workers=4)
-    validDataLoader = torch.utils.data.DataLoader(VALID_DATASET, batch_size=args.batch_size, shuffle=False, num_workers=4)
-    testDataLoader = torch.utils.data.DataLoader(TEST_DATASET, batch_size=args.batch_size, shuffle=False, num_workers=4)
+    validDataLoader = torch.utils.data.DataLoader(VALID_DATASET, collate_fn = clfn.collate_ignore_none, batch_size=args.batch_size, shuffle=False, num_workers=4)
+    testDataLoader = torch.utils.data.DataLoader(TEST_DATASET, collate_fn = clfn.collate_ignore_none, batch_size=args.batch_size, shuffle=False, num_workers=4)
 
     '''MODEL LOADING'''
-    num_class = 40
     MODEL = importlib.import_module(args.model)
-
-    # classifier = MODEL.get_model(args, num_class, normal_channel=args.normal).cuda()
-    # criterion = MODEL.get_loss().cuda()
     classifier = MODEL.get_model(last_npoint=10, atom_num_per_last_point = 10, atom_type_num = 10, normal_channel=args.normal)
     criterion = MODEL.get_loss()
+    if torch.cuda.device_count() > 1:
+        print("Let's use", torch.cuda.device_count(), "GPUs!")
+        # dim = 0 [30, xxx] -> [10, ...], [10, ...], [10, ...] on 3 GPUs
+        classifier = torch.nn.DataParallel(classifier)
+        criterion = torch.nn.DataParallel(criterion)
+    if torch.cuda.is_available():
+        classifier.cuda()
+        criterion.cuda()
     try:
         checkpoint = torch.load(str(experiment_dir) + '/checkpoints/best_model.pth')
         start_epoch = checkpoint['epoch']
@@ -165,8 +174,8 @@ def main(args):
     global_step = 0
     best_instance_acc = 0.0
     best_class_acc = 0.0
-    mean_correct = []
-
+    mean_gen_type_correct = []
+    mean_target_type_correct = []
     '''TRANING'''
     logger.info('Start training...')
     for epoch in range(start_epoch, args.epoch):
@@ -175,7 +184,7 @@ def main(args):
         scheduler.step()
         for batch_id, data in tqdm(enumerate(trainDataLoader, 0), total=len(trainDataLoader), smoothing=0.9):
             _, points, target = data
-            #todo continue debug for electron density data
+
             trot = None
             if args.rot == 'z':
                 trot = RotateAxisAngle(angle=torch.rand(points.shape[0]) * 360, axis="Z", degrees=True)
@@ -191,47 +200,47 @@ def main(args):
             points = torch.Tensor(points)
 
             points = points.transpose(2, 1)
-            # points, target = points.cuda(), target.cuda()
+            if torch.cuda.is_available():
+                points, target = points.cuda(), target.cuda()
             optimizer.zero_grad()
 
             classifier = classifier.train()
             center_coords, coords, types = classifier(points)
-            loss = criterion(center_coords, coords, types, target)
-            pred_choice = pred.data.max(1)[1]
-            correct = pred_choice.eq(target.long().data).cpu().sum()
-            mean_correct.append(correct.item() / float(points.size()[0]))
-            loss.backward()
+            loss, gen_type_loss, target_type_loss, emd_loss, gen_type_correct,  target_type_correct = criterion(center_coords, coords, types, target)
+            mean_gen_type_correct.append(gen_type_correct.cpu())
+            mean_target_type_correct.append(target_type_correct.cpu())
+            loss.sum().backward()
             optimizer.step()
             global_step += 1
 
-        train_instance_acc = np.mean(mean_correct)
-        log_string('Train Instance Accuracy: %f' % train_instance_acc)
+        log_string('Train Instance gen type Accuracy: %f' % np.mean(mean_gen_type_correct))
+        log_string('Train Instance target type Accuracy: %f' % np.mean(mean_target_type_correct))
 
-        with torch.no_grad():
-            instance_acc, class_acc = test(classifier.eval(), testDataLoader)
-
-            if (instance_acc >= best_instance_acc):
-                best_instance_acc = instance_acc
-                best_epoch = epoch + 1
-
-            if (class_acc >= best_class_acc):
-                best_class_acc = class_acc
-            log_string('Test Instance Accuracy: %f, Class Accuracy: %f' % (instance_acc, class_acc))
-            log_string('Best Instance Accuracy: %f, Class Accuracy: %f' % (best_instance_acc, best_class_acc))
-
-            if (instance_acc >= best_instance_acc):
-                logger.info('Save model...')
-                savepath = str(checkpoints_dir) + '/best_model.pth'
-                log_string('Saving at %s' % savepath)
-                state = {
-                    'epoch': best_epoch,
-                    'instance_acc': instance_acc,
-                    'class_acc': class_acc,
-                    'model_state_dict': classifier.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                }
-                torch.save(state, savepath)
-            global_epoch += 1
+        # with torch.no_grad():
+        #     instance_acc, class_acc = test(classifier.eval(), testDataLoader)
+        #
+        #     if (instance_acc >= best_instance_acc):
+        #         best_instance_acc = instance_acc
+        #         best_epoch = epoch + 1
+        #
+        #     if (class_acc >= best_class_acc):
+        #         best_class_acc = class_acc
+        #     log_string('Test Instance Accuracy: %f, Class Accuracy: %f' % (instance_acc, class_acc))
+        #     log_string('Best Instance Accuracy: %f, Class Accuracy: %f' % (best_instance_acc, best_class_acc))
+        #
+        #     if (instance_acc >= best_instance_acc):
+        #         logger.info('Save model...')
+        #         savepath = str(checkpoints_dir) + '/best_model.pth'
+        #         log_string('Saving at %s' % savepath)
+        #         state = {
+        #             'epoch': best_epoch,
+        #             'instance_acc': instance_acc,
+        #             'class_acc': class_acc,
+        #             'model_state_dict': classifier.state_dict(),
+        #             'optimizer_state_dict': optimizer.state_dict(),
+        #         }
+        #         torch.save(state, savepath)
+        #     global_epoch += 1
 
     logger.info('End of training...')
 

@@ -28,6 +28,6 @@ def collate_ignore_none(batch):
         '''
     r"""Puts each data field into a tensor with outer dimension batch size"""
 
-    batch = list(filter(lambda x: x[1] is not None, batch))
+    batch = list(filter(lambda x: (x[0] is not None) and (x[1] is not None) and (x[2] is not None), batch))
     if len(batch) == 0: return torch.Tensor()
     return default_collate(batch)

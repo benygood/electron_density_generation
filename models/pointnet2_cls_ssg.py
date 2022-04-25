@@ -78,9 +78,11 @@ class get_loss(nn.Module):
         target_ex_type = target_ex[:,:,:,-1].long()
         target_ex_type_for_gen = target_ex_type.gather(-1, inds_gen_local.squeeze())
         gen_type_loss = F.nll_loss(types, target_ex_type_for_gen)
+        gen_type_correct = (types.max(-1)[1] == target_ex_type_for_gen).float().mean()
         inds_target_local_ex = inds_target_local.squeeze().unsqueeze(-1).repeat(1,1,1,type_num)
         gen_types_for_target = types.gather(-2, inds_target_local_ex)
         target_type_loss = F.nll_loss(gen_types_for_target, target_ex_type)
+        target_type_correct = (gen_types_for_target.max(-1)[1] == target_ex_type).float().mean()
         emd_loss = dist_emd_gen_local.mean() + dist_emd_target_local.mean()
         loss = gen_type_loss + target_type_loss + emd_loss
-        return loss
+        return loss, gen_type_loss, target_type_loss, emd_loss, gen_type_correct,  target_type_correct

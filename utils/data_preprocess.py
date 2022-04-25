@@ -6,6 +6,7 @@ import numpy as np
 import lmdb
 import utils.dataset_collate_ignore_none as clfn
 import rdkit.Chem as Chem
+import traceback as tb
 
 '''
 Electron density value normalization  for XTB density
@@ -97,12 +98,16 @@ class ElectronDensityDirDataset(Dataset):
         fpath = os.path.join(self.dir_path, filename)
         electron_density = np.load(fpath).astype(np.float32)
         pdb_path = os.path.join("{}_pdb".format(self.dir_path), "{}.pdb".format(filename[:-4]))
-        coord_atoms = get_atom_coords(pdb_path)
-
-        if electron_density.shape[0] < self.lowerbound_npoints or coord_atoms.shape[0] > self.max_atom_count:
-            return None, None, None
-        electron_density = self._data_normalize_eletron_density(electron_density, self.sample_npoints)
-        coord_atoms = self._data_normalize_coord_atoms(coord_atoms, self.max_atom_count)
+        try:
+            coord_atoms = get_atom_coords(pdb_path)
+            if electron_density.shape[0] < self.lowerbound_npoints or coord_atoms.shape[0] > self.max_atom_count:
+                return None, None, None
+            electron_density = self._data_normalize_eletron_density(electron_density, self.sample_npoints)
+            coord_atoms = self._data_normalize_coord_atoms(coord_atoms, self.max_atom_count)
+        except Exception as e:
+            print(e.args)
+            print(tb.format_exc())
+            return  None, None, None
         return filename, electron_density, coord_atoms
 
     def __len__(self) -> int:
