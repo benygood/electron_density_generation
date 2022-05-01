@@ -14,16 +14,20 @@ import importlib
 from pytorch3d.transforms import RotateAxisAngle, Rotate, random_rotations
 import utils.dataset_collate_ignore_none as clfn
 import torch.distributed as dist
+from torch.nn.parallel import DataParallel as DP
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = BASE_DIR
 sys.path.append(os.path.join(ROOT_DIR, 'models'))
 
+
+DEBUG = False
+
 def parse_args():
     '''PARAMETERS'''
     parser = argparse.ArgumentParser('EDGen')
-    parser.add_argument('--model', default='pointnet2_cls_ssg', help='Model name [default: vn_dgcnn_cls]',
+    parser.add_argument('--model', default='vn_pointnet2_cls_ssg', help='Model name [default: vn_dgcnn_cls]',
                         choices=['pointnet_cls', 'vn_pointnet_cls', 'dgcnn_cls', 'vn_dgcnn_cls'])
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size in training [default: 32]')
     parser.add_argument('--epoch', default=250, type=int, help='Number of epoch in training [default: 250]')
@@ -53,7 +57,7 @@ def parse_args():
 def test(model, infer, loader):
     mean_gen_type_correct = []
     mean_target_type_correct = []
-    for j, data in tqdm(enumerate(loader), total=len(loader)):
+    for j, data in tqdm(enumerate(loader), total=len(loader), smoothing=0.9):
         _, points, target = data
 
         trot = None
@@ -63,9 +67,11 @@ def test(model, infer, loader):
             trot = Rotate(R=random_rotations(points.shape[0]))
         if trot is not None:
             points = trot.transform_points(points)
-        points = points.transpose(2, 1)
         if torch.cuda.is_available():
-            points, target = points.cuda(args.local_rank), target.cuda(args.local_rank)
+            if DEBUG:
+                points, target = points.cuda(), target.cuda()
+            else:
+                points, target = points.cuda(args.local_rank), target.cuda(args.local_rank)
         center_coords, coords, types = model(points)
         loss, gen_type_loss, target_type_loss, emd_loss, gen_type_correct, target_type_correct = infer(
             center_coords, coords, types, target)
@@ -83,9 +89,10 @@ def main(args):
 
     '''HYPER PARAMETER'''
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
-    os.environ['NCCL_SOCKET_IFNAME'] = 'lo'
-    torch.cuda.set_device(args.local_rank)  # 作用相当于CUDA_VISIBLE_DEVICES命令，修改环境变量
-    dist.init_process_group(backend='nccl')  # 设备间通讯通过后端backend实现，GPU上用nccl，CPU上用gloo
+    if not DEBUG:
+        os.environ['NCCL_SOCKET_IFNAME'] = 'lo'
+        torch.cuda.set_device(args.local_rank)  # 作用相当于CUDA_VISIBLE_DEVICES命令，修改环境变量
+        dist.init_process_group(backend='nccl')  # 设备间通讯通过后端backend实现，GPU上用nccl，CPU上用gloo
 
     '''CREATE DIR'''
     timestr = str(datetime.datetime.now().strftime('%Y-%m-%d_%H-%M'))
@@ -122,13 +129,26 @@ def main(args):
     TRAIN_DATASET = ElectronDensityDirDataset(DATA_PATH, split='train', sample_npoints=args.num_point)
     VALID_DATASET = ElectronDensityDirDataset(DATA_PATH, split='valid', sample_npoints=args.num_point)
     TEST_DATASET = ElectronDensityDirDataset(DATA_PATH,  split='test', sample_npoints=args.num_point)
-    train_sampler = torch.utils.data.distributed.DistributedSampler(TRAIN_DATASET)
-    test_sampler = torch.utils.data.distributed.DistributedSampler(TEST_DATASET,shuffle=False)
-    trainDataLoader = torch.utils.data.DataLoader(TRAIN_DATASET, collate_fn = clfn.collate_ignore_none, batch_size=args.batch_size,
-                                                  sampler=train_sampler, num_workers=4)
+    if DEBUG:
+        trainDataLoader = torch.utils.data.DataLoader(TRAIN_DATASET, collate_fn=clfn.collate_ignore_none,
+                                                      batch_size=args.batch_size,
+                                                      shuffle=True, num_workers=1)
+    else:
+        train_sampler = torch.utils.data.distributed.DistributedSampler(TRAIN_DATASET)
+        trainDataLoader = torch.utils.data.DataLoader(TRAIN_DATASET, collate_fn = clfn.collate_ignore_none,
+                                                      batch_size=args.batch_size,
+                                                      sampler=train_sampler, num_workers=4)
     validDataLoader = torch.utils.data.DataLoader(VALID_DATASET, collate_fn = clfn.collate_ignore_none, batch_size=args.batch_size, shuffle=False, num_workers=4)
-    testDataLoader = torch.utils.data.DataLoader(TEST_DATASET, collate_fn = clfn.collate_ignore_none, batch_size=args.batch_size,
-                                                 sampler=test_sampler, num_workers=4)
+
+    if DEBUG:
+        testDataLoader = torch.utils.data.DataLoader(TEST_DATASET, collate_fn=clfn.collate_ignore_none,
+                                                     batch_size=args.batch_size,
+                                                     shuffle=False, num_workers=1)
+    else:
+        test_sampler = torch.utils.data.distributed.DistributedSampler(TEST_DATASET, shuffle=False)
+        testDataLoader = torch.utils.data.DataLoader(TEST_DATASET, collate_fn = clfn.collate_ignore_none,
+                                                     batch_size=args.batch_size,
+                                                     sampler=test_sampler, num_workers=4)
 
     '''MODEL LOADING'''
     MODEL = importlib.import_module(args.model)
@@ -136,12 +156,18 @@ def main(args):
     criterion = MODEL.get_loss()
     # model_stat.getModelSize(classifier)
     if torch.cuda.is_available():
-        classifier.to(args.local_rank)
-        criterion.to(args.local_rank)
+        if DEBUG:
+            criterion.cuda()
+        else:
+            classifier.to(args.local_rank)
+            criterion.to(args.local_rank)
     if torch.cuda.device_count() > 0:
         print("Let's use", torch.cuda.device_count(), "GPUs!")
         # dim = 0 [30, xxx] -> [10, ...], [10, ...], [10, ...] on 3 GPUs
-        classifier = DDP(classifier, device_ids=[args.local_rank], output_device=args.local_rank)
+        if DEBUG:
+            classifier = classifier.cuda()
+        else:
+            classifier = DDP(classifier, device_ids=[args.local_rank], output_device=args.local_rank)
     try:
         checkpoint = torch.load(str(experiment_dir) + '/checkpoints/best_model.pth')
         start_epoch = checkpoint['epoch']
@@ -184,7 +210,8 @@ def main(args):
         instance_acc1, instance_acc2))
     for epoch in range(start_epoch, args.epoch):
         log_string('Epoch %d (%d/%s):' % (global_epoch + 1, epoch + 1, args.epoch))
-        trainDataLoader.sampler.set_epoch(epoch)
+        if not DEBUG:
+            trainDataLoader.sampler.set_epoch(epoch)
         for batch_id, data in tqdm(enumerate(trainDataLoader, 0), total=len(trainDataLoader), smoothing=0.9):
             _, points, target = data
 
@@ -203,9 +230,11 @@ def main(args):
             points[:, :, 0:3] = provider.shift_point_cloud(points[:, :, 0:3])
             points = torch.Tensor(points)
 
-            points = points.transpose(2, 1)
             if torch.cuda.is_available():
-                points, target = points.cuda(args.local_rank), target.cuda(args.local_rank)
+                if DEBUG:
+                    points, target = points.cuda(), target.cuda()
+                else:
+                    points, target = points.cuda(args.local_rank), target.cuda(args.local_rank)
             optimizer.zero_grad()
             center_coords, coords, types = classifier(points)
             loss, gen_type_loss, target_type_loss, emd_loss, gen_type_correct,  target_type_correct = criterion(center_coords, coords, types, target)
