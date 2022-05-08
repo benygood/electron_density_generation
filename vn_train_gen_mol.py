@@ -35,7 +35,7 @@ def parse_args():
                         help='Initial learning rate (for SGD it is multiplied by 100) [default: 0.001]')
     parser.add_argument('--decay_rate', type=float, default=1e-4, help='Decay rate [default: 1e-4]')
     parser.add_argument('--optimizer', type=str, default='SGD', help='Pptimizer for training [default: SGD]')
-    parser.add_argument('--gpu', type=str, default='0', help='Specify gpu device [default: 0]')
+    parser.add_argument('--gpu', type=str, default='-1', help='Specify gpu device [default: 0]')
     parser.add_argument('--local_rank', type=int, default=-1, help='Specify  local rank [default: -1]')
     parser.add_argument('--num_point', type=int, default=20000, help='Point Number [default: 20000]')
     parser.add_argument('--log_dir', type=str, default='vn_dgcnn/aligned',
@@ -51,10 +51,13 @@ def parse_args():
                         choices=['mean', 'max'])
     parser.add_argument('--n_knn', default=20, type=int,
                         help='Number of nearest neighbors to use, not applicable to PointNet [default: 20]')
+    parser.add_argument('--nprocs', default=2, type=int,
+                        help='Number of GPU processes [default: 2]')
     return parser.parse_args()
 
 
-def test(model, infer, loader):
+def test(model, infer, loader, args):
+    model.eval()
     mean_gen_type_correct = []
     mean_target_type_correct = []
     for j, data in tqdm(enumerate(loader), total=len(loader), smoothing=0.9):
@@ -75,8 +78,17 @@ def test(model, infer, loader):
         center_coords, coords, types = model(points)
         loss, gen_type_loss, target_type_loss, emd_loss, gen_type_correct, target_type_correct = infer(
             center_coords, coords, types, target)
-        mean_gen_type_correct.append(gen_type_correct.cpu())
-        mean_target_type_correct.append(target_type_correct.cpu())
+
+        if DEBUG:
+            mean_gen_type_correct.append(gen_type_correct.item())
+            mean_target_type_correct.append(target_type_correct.item())
+        else:
+            torch.distributed.barrier()
+            reduced_gen_type_correct = reduce_mean(gen_type_correct, args.nprocs)
+            reduced_target_type_correct = reduce_mean(target_type_correct, args.nprocs)
+            mean_gen_type_correct.append(reduced_gen_type_correct.item())
+            mean_target_type_correct.append(reduced_target_type_correct.item())
+
     instance_gen_type_acc = np.mean(mean_gen_type_correct)
     instance_target_type_acc = np.mean(mean_target_type_correct)
     return instance_gen_type_acc, instance_target_type_acc
@@ -93,6 +105,7 @@ def main(args):
         os.environ['NCCL_SOCKET_IFNAME'] = 'lo'
         torch.cuda.set_device(args.local_rank)  # 作用相当于CUDA_VISIBLE_DEVICES命令，修改环境变量
         dist.init_process_group(backend='nccl')  # 设备间通讯通过后端backend实现，GPU上用nccl，CPU上用gloo
+        args.nprocs = torch.cuda.device_count()
 
     '''CREATE DIR'''
     timestr = str(datetime.datetime.now().strftime('%Y-%m-%d_%H-%M'))
@@ -132,7 +145,7 @@ def main(args):
     if DEBUG:
         trainDataLoader = torch.utils.data.DataLoader(TRAIN_DATASET, collate_fn=clfn.collate_ignore_none,
                                                       batch_size=args.batch_size,
-                                                      shuffle=True, num_workers=1)
+                                                      shuffle=True, num_workers=2)
     else:
         train_sampler = torch.utils.data.distributed.DistributedSampler(TRAIN_DATASET)
         trainDataLoader = torch.utils.data.DataLoader(TRAIN_DATASET, collate_fn = clfn.collate_ignore_none,
@@ -143,7 +156,7 @@ def main(args):
     if DEBUG:
         testDataLoader = torch.utils.data.DataLoader(TEST_DATASET, collate_fn=clfn.collate_ignore_none,
                                                      batch_size=args.batch_size,
-                                                     shuffle=False, num_workers=1)
+                                                     shuffle=False, num_workers=2)
     else:
         test_sampler = torch.utils.data.distributed.DistributedSampler(TEST_DATASET, shuffle=False)
         testDataLoader = torch.utils.data.DataLoader(TEST_DATASET, collate_fn = clfn.collate_ignore_none,
@@ -159,8 +172,8 @@ def main(args):
         if DEBUG:
             criterion.cuda()
         else:
-            classifier.to(args.local_rank)
-            criterion.to(args.local_rank)
+            classifier.cuda(args.local_rank)
+            criterion.cuda(args.local_rank)
     if torch.cuda.device_count() > 0:
         print("Let's use", torch.cuda.device_count(), "GPUs!")
         # dim = 0 [30, xxx] -> [10, ...], [10, ...], [10, ...] on 3 GPUs
@@ -200,18 +213,20 @@ def main(args):
     best_instance_acc2 = 0.0
     best_epoch1 = 0
     best_epoch2 = 0
-    mean_gen_type_correct = []
-    mean_target_type_correct = []
     '''TRANING'''
-    logger.info('Start training...')
+    logger.info('init eval...')
     with torch.no_grad():
-        instance_acc1, instance_acc2 = test(classifier, criterion, testDataLoader)
+        instance_acc1, instance_acc2 = test(classifier, criterion, testDataLoader, args)
         log_string('Test Instance Accuracy gen->target:  %.4f, Instance Accuracy target->gen:       %.4f' % (
         instance_acc1, instance_acc2))
+    logger.info('Start training...')
     for epoch in range(start_epoch, args.epoch):
         log_string('Epoch %d (%d/%s):' % (global_epoch + 1, epoch + 1, args.epoch))
         if not DEBUG:
             trainDataLoader.sampler.set_epoch(epoch)
+        classifier.train()
+        mean_gen_type_correct = []
+        mean_target_type_correct = []
         for batch_id, data in tqdm(enumerate(trainDataLoader, 0), total=len(trainDataLoader), smoothing=0.9):
             _, points, target = data
 
@@ -235,12 +250,24 @@ def main(args):
                     points, target = points.cuda(), target.cuda()
                 else:
                     points, target = points.cuda(args.local_rank), target.cuda(args.local_rank)
-            optimizer.zero_grad()
+
             center_coords, coords, types = classifier(points)
             loss, gen_type_loss, target_type_loss, emd_loss, gen_type_correct,  target_type_correct = criterion(center_coords, coords, types, target)
-            mean_gen_type_correct.append(gen_type_correct.cpu())
-            mean_target_type_correct.append(target_type_correct.cpu())
-            loss.sum().backward()
+            if DEBUG:
+                mean_gen_type_correct.append(gen_type_correct.item())
+                mean_target_type_correct.append(target_type_correct.item())
+            else:
+                torch.distributed.barrier()
+                reduced_gen_type_correct = reduce_mean(gen_type_correct, args.nprocs)
+                reduced_target_type_correct = reduce_mean(target_type_correct, args.nprocs)
+                mean_gen_type_correct.append(reduced_gen_type_correct.item())
+                mean_target_type_correct.append(reduced_target_type_correct.item())
+
+            optimizer.zero_grad()
+            if DEBUG:
+                loss.sum().backward()
+            else:
+                loss.backward()
             optimizer.step()
             global_step += 1
 
@@ -248,7 +275,7 @@ def main(args):
         log_string('Train Instance target type Accuracy: %f' % np.mean(mean_target_type_correct))
         scheduler.step()
         with torch.no_grad():
-            instance_acc1, instance_acc2 = test(classifier, criterion, testDataLoader)
+            instance_acc1, instance_acc2 = test(classifier, criterion, testDataLoader, args)
             if (instance_acc1 >= best_instance_acc1):
                 best_instance_acc1 = instance_acc1
                 best_epoch1 = epoch + 1
@@ -259,7 +286,7 @@ def main(args):
             log_string('Test Instance Accuracy gen->target:  %.4f, Instance Accuracy target->gen:       %.4f' % (instance_acc1, instance_acc2))
             log_string('Best Instance Accuracy gen->target:  %.4f, Best Instance Accuracy gen->target:  %.4f' % (best_instance_acc1, best_instance_acc2))
 
-            if (instance_acc1 >= best_instance_acc1 and instance_acc2 >= best_instance_acc2):
+            if (instance_acc1 >= best_instance_acc1 and instance_acc2 >= best_instance_acc2) and args.local_rank == 0:
                 logger.info('Save model...')
                 savepath = str(checkpoints_dir) + '/best_model.pth'
                 log_string('Saving at %s' % savepath)
@@ -267,13 +294,42 @@ def main(args):
                     'epoch': best_epoch1,
                     'instance_acc gen2target': instance_acc1,
                     'instance_acc target2gen': instance_acc2,
-                    'model_state_dict': classifier.state_dict(),
+                    'model_state_dict': classifier.module.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
                 }
                 torch.save(state, savepath)
+            global_epoch += 1
 
     logger.info('End of training...')
 
+def reduce_mean(tensor, nprocs):
+    rt = tensor.clone()
+    dist.all_reduce(rt, op=dist.ReduceOp.SUM)
+    rt /= nprocs
+    return rt
+
+class AverageMeter(object):
+    """Computes and stores the average and current value"""
+    def __init__(self, name, fmt=':f'):
+        self.name = name
+        self.fmt = fmt
+        self.reset()
+
+    def reset(self):
+        self.val = 0
+        self.avg = 0
+        self.sum = 0
+        self.count = 0
+
+    def update(self, val, n=1):
+        self.val = val
+        self.sum += val * n
+        self.count += n
+        self.avg = self.sum / self.count
+
+    def __str__(self):
+        fmtstr = '{name} {val' + self.fmt + '} ({avg' + self.fmt + '})'
+        return fmtstr.format(**self.__dict__)
 
 if __name__ == '__main__':
     args = parse_args()

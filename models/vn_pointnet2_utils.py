@@ -5,6 +5,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from time import time
 import numpy as np
+
+import utils.cluster
 from vn_layers import *
 
 def timeit(tag, t):
@@ -102,14 +104,14 @@ def query_ball_point(radius, nsample, xyz, new_xyz):
     group_idx = torch.arange(N, dtype=torch.long).to(device).view(1, 1, N).repeat([B, S, 1])
     sqrdists = square_distance(new_xyz, xyz)
     group_idx[sqrdists > radius ** 2] = N
-    group_idx = group_idx.sort(dim=-1)[0][:, :, :nsample]
+    group_idx = group_idx.topk(k=nsample,dim=-1,largest=False, sorted=False)[1]
     group_first = group_idx[:, :, 0].view(B, S, 1).repeat([1, 1, nsample])
     mask = group_idx == N
     group_idx[mask] = group_first[mask] #If there is not enough points within radius,  fill with the first point(at least there is one point not equal to 1024) in 32 points.
     return group_idx
 
 
-def sample_and_group(npoint, radius, nsample, xyz, points, returnfps=False):
+def sample_and_group(npoint, radius, nsample, xyz, points):
     """
     Input:
         npoint:
@@ -123,8 +125,9 @@ def sample_and_group(npoint, radius, nsample, xyz, points, returnfps=False):
     """
     B, N, _ = xyz.shape
     S = npoint
-    fps_idx = farthest_point_sample(xyz, npoint) # [B, npoint, 3]
-    new_xyz = index_points(xyz, fps_idx)
+    #fps_idx = farthest_point_sample(xyz, npoint) # [B, npoint, 3]
+    new_xyz = utils.cluster.kmeans(xyz, npoint)
+    #new_xyz = index_points(xyz, fps_idx)
     idx = query_ball_point(radius, nsample, xyz, new_xyz)
     grouped_xyz = index_points(xyz, idx) # [B, npoint, nsample, 3]
     grouped_xyz_norm = grouped_xyz - new_xyz.view(B, S, 1, 3)
@@ -134,10 +137,8 @@ def sample_and_group(npoint, radius, nsample, xyz, points, returnfps=False):
         new_points = torch.cat([grouped_xyz_norm, grouped_points], dim=-2) # [B, npoint, nsample, 1+D, 3]
     else:
         new_points = grouped_xyz_norm
-    if returnfps:
-        return new_xyz, new_points, grouped_xyz, fps_idx
-    else:
-        return new_xyz, new_points
+
+    return new_xyz, new_points
 
 
 def sample_and_group_all(xyz, points):

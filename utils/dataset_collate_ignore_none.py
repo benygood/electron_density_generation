@@ -7,7 +7,6 @@ static methods.
 
 import torch
 import re
-from torch._six import container_abcs, string_classes, int_classes
 from  torch.utils.data._utils.collate import default_collate
 np_str_obj_array_pattern = re.compile(r'[SaUO]')
 

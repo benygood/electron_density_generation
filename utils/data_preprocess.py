@@ -21,7 +21,7 @@ normalize from [-10,10] to [-1,1]
 '''
 
 atom_type_config = { 'C':0, 'N':1 , 'O':2, 'F':3, 'Cl':4, 'Br':5, 'I':6, 'S':7, 'P':8, 'H':9 }
-
+atom_type_config_arr = np.array(['C','N','O','F','Cl','Br','I','S','P','H'])
 
 def split_train_valid_test(dir_path):
     dir_name = os.path.basename(dir_path)
@@ -40,6 +40,7 @@ def split_train_valid_test(dir_path):
             pickle.dump(filenames[train_n: n - test_n], f)
         with open(filenames_config_test_path, 'wb') as f:
             pickle.dump(filenames[n - test_n: ], f)
+
     return filenames_config_train_path, filenames_config_valid_path, filenames_config_test_path
 
 def get_atom_coords(pdb_path):
@@ -62,18 +63,22 @@ class ElectronDensityDirDataset(Dataset):
         self.sample_npoints = sample_npoints
         self.lowerbound_npoints =lowerbound_npoints
         self.max_atom_count = max_atom_count
-        train_config_path, valid_config_path, test_config_path = split_train_valid_test(dir_path)
-        if split == 'train':
-            self.filenames_config_path = train_config_path
-        elif split == 'valid':
-            self.filenames_config_path = valid_config_path
-        elif split == 'test':
-            self.filenames_config_path = test_config_path
-        else:
-            raise Exception("illegal split name: {}".format(split))
-        with open(self.filenames_config_path, 'rb') as f:
-            filenames = pickle.load(f)
-        self.filenames = filenames
+        try:
+            train_config_path, valid_config_path, test_config_path = split_train_valid_test(dir_path)
+            if split == 'train':
+                self.filenames_config_path = train_config_path
+            elif split == 'valid':
+                self.filenames_config_path = valid_config_path
+            elif split == 'test':
+                self.filenames_config_path = test_config_path
+            else:
+                raise Exception("illegal split name: {}".format(split))
+            with open(self.filenames_config_path, 'rb') as f:
+                filenames = pickle.load(f)
+            self.filenames = filenames
+        except Exception as e:
+            print(e.args)
+            print(tb.format_exc())
 
     def _data_normalize_eletron_density(self, electron_density, npoints=None ):
         if npoints is not None:
@@ -112,6 +117,20 @@ class ElectronDensityDirDataset(Dataset):
 
     def __len__(self) -> int:
         return len(self.filenames)
+
+    def get(self, ed_fpath, pdb_fpath):
+        electron_density = np.load(ed_fpath).astype(np.float32)
+        try:
+            coord_atoms = get_atom_coords(pdb_fpath)
+            if electron_density.shape[0] < self.lowerbound_npoints or coord_atoms.shape[0] > self.max_atom_count:
+                return None, None, None
+            electron_density = self._data_normalize_eletron_density(electron_density, self.sample_npoints)
+            coord_atoms = self._data_normalize_coord_atoms(coord_atoms, self.max_atom_count)
+        except Exception as e:
+            print(e.args)
+            print(tb.format_exc())
+            return None, None, None
+        return ed_fpath, electron_density, coord_atoms
 
 def test_ElectronDensityDirDataset():
     dataset = ElectronDensityDirDataset("/home/jovyan/data/xtb_ed", split='valid')
