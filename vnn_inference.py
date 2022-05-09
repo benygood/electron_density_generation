@@ -9,6 +9,7 @@ from utils.to_pdb import produce_pdb_ligand_with_confidence
 import utils.data_preprocess as dp
 import importlib
 import torch
+import traceback as tb
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = BASE_DIR
 sys.path.append(os.path.join(ROOT_DIR, 'models'))
@@ -31,8 +32,12 @@ def main(args):
     MODEL = importlib.import_module(args.model)
     classifier = MODEL.get_model(last_npoint=10, atom_num_per_last_point=10, atom_type_num=10,
                                  normal_channel=args.normal)
-    checkpoint = torch.load(args.checkpoint_path,map_location=torch.device('cpu'))
-    classifier.load_state_dict(checkpoint['model_state_dict'])
+    try:
+        checkpoint = torch.load(args.checkpoint_path,map_location=torch.device('cpu'))
+        classifier.load_state_dict(checkpoint['model_state_dict'])
+    except Exception as e:
+        print(e.args)
+        print(tb.format_exc())
     classifier.eval()
 
     ds = ElectronDensityDirDataset("")

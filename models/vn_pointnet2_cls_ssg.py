@@ -36,23 +36,23 @@ class get_model(nn.Module):
         l2_xyz, l2_points = self.sa2(l1_xyz, l1_points)
         l3_xyz, l3_points = self.sa3(l2_xyz, l2_points)
         #todo deal with gnn for l3 to get global information
-
+        last_xyz, last_points = l3_xyz,l3_points
         #fixme:  how to generate multi points for every l3 point: here use mlp and reshape;
         # maybe use rnn or transformer is better
-        B, N, _, _ = l3_points.size()
-        l3_points = l3_points.view(B, N, -1)
-        l3_points = l3_points.permute(0, 2, 1)
-        coords_emb = F.relu(self.conv_coord_bn(self.conv_coord(l3_points))).permute(0, 2, 1)
+        B, N, _, _ = last_points.size()
+        last_points = last_points.view(B, N, -1)
+        last_points = last_points.permute(0, 2, 1)
+        coords_emb = F.relu(self.conv_coord_bn(self.conv_coord(last_points))).permute(0, 2, 1)
         coords_emb = coords_emb.reshape(B,-1, self.atom_num_per_last_point, 3, 16)
-        atoms_emb = F.relu(self.conv_type_bn(self.conv_type(l3_points))).permute(0,2,1)
+        atoms_emb = F.relu(self.conv_type_bn(self.conv_type(last_points))).permute(0,2,1)
         atoms_emb = atoms_emb.reshape(B,-1, self.atom_num_per_last_point, 16)
-        coords = self.fc1(coords_emb).squeeze()
+        coords = self.fc1(coords_emb).squeeze(-1)
         # add abs center coordinates
-        l3_xyz_tile = l3_xyz.repeat(1, 1, self.atom_num_per_last_point)
-        l3_xyz_tile = l3_xyz_tile.view(B, -1, self.atom_num_per_last_point, 3)
-        coords = coords + l3_xyz_tile
+        last_xyz_tile = last_xyz.repeat(1, 1, self.atom_num_per_last_point)
+        last_xyz_tile = last_xyz_tile.view(B, -1, self.atom_num_per_last_point, 3)
+        coords = coords + last_xyz_tile
         atoms = F.log_softmax(self.fc2(atoms_emb), -1)
-        return l3_xyz, coords, atoms
+        return last_xyz, coords, atoms
 
 
 
@@ -81,10 +81,10 @@ class get_loss(nn.Module):
         dist_emd_gen_local = dist_local.gather(-1, inds_gen_local)
         dist_emd_target_local =  dist_local.gather(-2, inds_target_local)
         target_ex_type = target_ex[:,:,:,-1].long()
-        target_ex_type_for_gen = target_ex_type.gather(-1, inds_gen_local.squeeze())
+        target_ex_type_for_gen = target_ex_type.gather(-1, inds_gen_local.squeeze(-1))
         gen_type_loss = F.nll_loss(types, target_ex_type_for_gen)
         gen_type_correct = (types.max(-1)[1] == target_ex_type_for_gen).float().mean()
-        inds_target_local_ex = inds_target_local.squeeze().unsqueeze(-1).repeat(1,1,1,type_num)
+        inds_target_local_ex = inds_target_local.squeeze(-2).unsqueeze(-1).repeat(1,1,1,type_num)
         gen_types_for_target = types.gather(-2, inds_target_local_ex)
         target_type_loss = F.nll_loss(gen_types_for_target, target_ex_type)
         target_type_correct = (gen_types_for_target.max(-1)[1] == target_ex_type).float().mean()
