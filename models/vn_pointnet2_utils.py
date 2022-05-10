@@ -1,13 +1,8 @@
-import os
-import sys
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
 from time import time
-import numpy as np
-
 import utils.cluster
 from vn_layers import *
+from utils.points_utils import *
+
 
 def timeit(tag, t):
     print("{}: {}s".format(tag, time() - t))
@@ -41,52 +36,6 @@ def square_distance(src, dst):
     dist += torch.sum(src ** 2, -1).unsqueeze(-1)
     dist += torch.sum(dst ** 2, -1).unsqueeze(-2)
     return dist
-
-
-
-def index_points(points, idx):
-    """
-
-    Input:
-        points: input points data, [B, N, C]
-        idx: sample index data, [B, S]
-    Return:
-        new_points:, indexed points data, [B, S, C]
-    """
-    device = points.device
-    B = points.shape[0]
-    view_shape = list(idx.shape)
-    view_shape[1:] = [1] * (len(view_shape) - 1)
-    repeat_shape = list(idx.shape)
-    repeat_shape[0] = 1
-    batch_indices = torch.arange(B, dtype=torch.long).to(device).view(view_shape).repeat(repeat_shape)
-    new_points = points[batch_indices, idx, :]
-    return new_points
-
-
-def farthest_point_sample(xyz, npoint):
-    """
-    Input:
-        xyz: pointcloud data, [B, N, 3]
-        npoint: number of samples
-    Return:
-        centroids: sampled pointcloud index, [B, npoint]
-    """
-    device = xyz.device
-    B, N, C = xyz.shape
-    centroids = torch.zeros(B, npoint, dtype=torch.long).to(device)
-    distance = torch.ones(B, N).to(device) * 1e10
-    farthest = torch.randint(0, N, (B,), dtype=torch.long).to(device)
-    batch_indices = torch.arange(B, dtype=torch.long).to(device)
-    for i in range(npoint):
-        centroids[:, i] = farthest
-        centroid = xyz[batch_indices, farthest, :].view(B, 1, 3)
-        dist = torch.sum((xyz - centroid) ** 2, -1)
-        mask = dist < distance
-        distance[mask] = dist[mask]
-        farthest = torch.max(distance, -1)[1]
-    return centroids
-
 
 def query_ball_point(radius, nsample, xyz, new_xyz):
     """
@@ -184,6 +133,8 @@ class PointNetSetAbstraction(nn.Module):
             new_xyz: sampled points position data, [B, S, 3]
             new_points_concat: sample points feature data, [B, S, D', 3]
         """
+        #todo use GNN before pooling
+
         new_xyz, new_points = sample_and_group(self.npoint, self.radius, self.nsample, xyz, points)
         # new_xyz: sampled points position data, [B, npoint, 3]
         # new_points: sampled points data, [B, npoint, nsample, 1+D, 3]

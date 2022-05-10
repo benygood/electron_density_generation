@@ -1,5 +1,7 @@
 import torch
-def kmeans(x, ncluster, niter=5):
+from utils.points_utils import *
+
+def kmeans(x, ncluster, niter=10, init_plusplus=False):
     '''
     From minGPT implement
     x : torch.tensor(data_num,data_dim)
@@ -7,7 +9,11 @@ def kmeans(x, ncluster, niter=5):
     niter : Number of iterations for kmeans
     '''
     B, N, D = x.size()
-    c = x[:, torch.randperm(N, device=x.device)[:ncluster]] # init clusters at random
+    if init_plusplus:
+        c_idx = farthest_point_sample(x, ncluster)
+        c = index_points(x, c_idx)
+    else:
+        c = x[:, torch.randperm(N, device=x.device)[:ncluster]] # init clusters at random
     for i in range(niter):
         # assign all pixels to the closest codebook element
         # .argmin(1) : 按列取最小值的下标,下面这行的意思是将x.size(0)个数据点归类到random选出的ncluster类
