@@ -18,7 +18,7 @@ def parse_args():
     '''PARAMETERS'''
     parser = argparse.ArgumentParser('EDGen')
     parser.add_argument('--model', default='vn_pointnet2_cls_ssg', help='Model name [default: vn_dgcnn_cls]',
-                        choices=['pointnet_cls', 'vn_pointnet_cls', 'dgcnn_cls', 'vn_dgcnn_cls'])
+                        choices=['pointnet_cls', 'vn_pointnet_cls', 'dgcnn_cls', 'vn_dgcnn_cls', 'vn_pointnet2_dgcnn_cls_ssg'])
     parser.add_argument('--gpu', type=str, default='-1', help='Specify gpu device [default: 0]')
 
     parser.add_argument('--ed', help='input electron density file. npy format')
@@ -32,6 +32,7 @@ def main(args):
     MODEL = importlib.import_module(args.model)
     classifier = MODEL.get_model(last_npoint=10, atom_num_per_last_point=10, atom_type_num=10,
                                  normal_channel=args.normal)
+    criterion = MODEL.get_loss()
     try:
         checkpoint = torch.load(args.checkpoint_path,map_location=torch.device('cpu'))
         classifier.load_state_dict(checkpoint['model_state_dict'])
@@ -49,6 +50,9 @@ def main(args):
     _, points, target = ds.get(ed_path,pdb_path)
 
     center_coords, coords, types = classifier(torch.Tensor(points[np.newaxis, :, :]))
+    loss, gen_type_loss, target_type_loss, emd_loss, gen_type_correct, target_type_correct = criterion(center_coords, coords, types, torch.Tensor(target[np.newaxis, :, :]))
+    print('Test Instance Accuracy gen->target:  {:.4f}, Instance Accuracy target->gen: {:.4f}'.format(gen_type_correct, target_type_correct))
+    print('emd_loss: {:.4f}'.format(emd_loss))
     symbols = dp.atom_type_config_arr[types.max(-1)[1].view(-1)]
     coords = np.array(coords.view(-1,3).tolist())*10
     coords = np.hstack([coords,symbols[:,np.newaxis]])

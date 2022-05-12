@@ -27,7 +27,7 @@ DEBUG = False
 def parse_args():
     '''PARAMETERS'''
     parser = argparse.ArgumentParser('EDGen')
-    parser.add_argument('--model', default='vn_pointnet2_cls_ssg', help='Model name [default: vn_dgcnn_cls]',
+    parser.add_argument('--model', default='vn_pointnet2_dgcnn_cls_ssg', help='Model name [default: vn_dgcnn_cls]',
                         choices=['pointnet_cls', 'vn_pointnet_cls', 'dgcnn_cls', 'vn_dgcnn_cls'])
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size in training [default: 32]')
     parser.add_argument('--epoch', default=250, type=int, help='Number of epoch in training [default: 250]')
