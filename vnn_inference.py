@@ -17,7 +17,7 @@ sys.path.append(os.path.join(ROOT_DIR, 'models'))
 def parse_args():
     '''PARAMETERS'''
     parser = argparse.ArgumentParser('EDGen')
-    parser.add_argument('--model', default='vn_pointnet2_cls_ssg', help='Model name [default: vn_dgcnn_cls]',
+    parser.add_argument('--model', default='vn_pointnet2_dgcnn_cls_ssg', help='Model name [default: vn_dgcnn_cls]',
                         choices=['pointnet_cls', 'vn_pointnet_cls', 'dgcnn_cls', 'vn_dgcnn_cls', 'vn_pointnet2_dgcnn_cls_ssg'])
     parser.add_argument('--gpu', type=str, default='-1', help='Specify gpu device [default: 0]')
 
